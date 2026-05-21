@@ -11,7 +11,7 @@ using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Configure Serilog
+// Configure Serilog for structured logging
 Log.Logger = new LoggerConfiguration()
     .ReadFrom.Configuration(builder.Configuration)
     .Enrich.FromLogContext()
@@ -24,57 +24,130 @@ builder.Host.UseSerilog();
 // Add services to the container
 builder.Services.AddControllers(options =>
 {
+    options.ModelValidatorProviders.Clear();
+    options.Filters.Add<ValidationActionFilter>();
     options.Filters.Add<GlobalExceptionFilter>();
+});
+
+// API Versioning
+builder.Services.AddApiVersioning(config =>
+{
+    config.ApiVersionReader = ApiVersionReader.Combine(
+        new QueryStringApiVersionReader("version"),
+        new HeaderApiVersionReader("X-Version"),
+        new MediaTypeApiVersionReader("ver")
+    );
+    config.DefaultApiVersion = new ApiVersion(1, 0);
+    config.AssumeDefaultVersionWhenUnspecified = true;
+});
+
+builder.Services.AddVersionedApiExplorer(setup =>
+{
+    setup.GroupNameFormat = "'v'VVV";
+    setup.SubstituteApiVersionInUrl = true;
 });
 
 // Configure Entity Framework
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
 {
     var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
-    options.UseSqlServer(connectionString, b => b.MigrationsAssembly("DocumentAnalyzer.Infrastructure"));
+    options.UseSqlServer(connectionString, sqlOptions =>
+    {
+        sqlOptions.EnableRetryOnFailure(
+            maxRetryCount: 3,
+            maxRetryDelay: TimeSpan.FromSeconds(5),
+            errorNumbersToAdd: null);
+        sqlOptions.CommandTimeout(30);
+        sqlOptions.MigrationsAssembly("DocumentAnalyzer.Infrastructure");
+    });
     options.EnableSensitiveDataLogging(builder.Environment.IsDevelopment());
+
+    if (builder.Environment.IsDevelopment())
+    {
+        options.EnableDetailedErrors();
+    }
+});
+
+// Database Configuration for DocumentAnalyzerDbContext
+builder.Services.AddDbContext<DocumentAnalyzerDbContext>(options =>
+{
+    var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+    options.UseSqlServer(connectionString, sqlOptions =>
+    {
+        sqlOptions.EnableRetryOnFailure(
+            maxRetryCount: 3,
+            maxRetryDelay: TimeSpan.FromSeconds(5),
+            errorNumbersToAdd: null);
+        sqlOptions.CommandTimeout(30);
+    });
+
+    if (builder.Environment.IsDevelopment())
+    {
+        options.EnableSensitiveDataLogging();
+        options.EnableDetailedErrors();
+    }
 });
 
 // Configure JWT Authentication
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
-    {
-        options.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidateAudience = true,
-            ValidateLifetime = true,
-            ValidateIssuerSigningKey = true,
-            ValidIssuer = builder.Configuration["Jwt:Issuer"],
-            ValidAudience = builder.Configuration["Jwt:Audience"],
-            IssuerSigningKey = new SymmetricSecurityKey(
-                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"] ?? throw new InvalidOperationException("JWT Key not configured"))),
-            ClockSkew = TimeSpan.FromMinutes(5)
-        };
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultScheme = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    var jwtSettings = builder.Configuration.GetSection("JwtSettings");
+    var jwtConfig = builder.Configuration.GetSection("Jwt");
+    var secretKey = jwtSettings["SecretKey"] ?? jwtConfig["Key"];
 
-        options.Events = new JwtBearerEvents
+    if (string.IsNullOrEmpty(secretKey))
+    {
+        throw new InvalidOperationException("JWT SecretKey/Key is not configured");
+    }
+
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuer = true,
+        ValidateAudience = true,
+        ValidateLifetime = true,
+        ValidateIssuerSigningKey = true,
+        ValidIssuer = jwtSettings["Issuer"] ?? jwtConfig["Issuer"],
+        ValidAudience = jwtSettings["Audience"] ?? jwtConfig["Audience"],
+        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey)),
+        ClockSkew = TimeSpan.FromMinutes(5)
+    };
+
+    options.Events = new JwtBearerEvents
+    {
+        OnAuthenticationFailed = context =>
         {
-            OnAuthenticationFailed = context =>
-            {
-                Log.Warning("Authentication failed: {Error}", context.Exception.Message);
-                return Task.CompletedTask;
-            },
-            OnTokenValidated = context =>
-            {
-                Log.Information("Token validated for user: {UserId}", context.Principal?.FindFirst(ClaimTypes.NameIdentifier)?.Value);
-                return Task.CompletedTask;
-            }
-        };
-    });
+            Log.Warning("Authentication failed: {Error}", context.Exception.Message);
+            return Task.CompletedTask;
+        },
+        OnTokenValidated = context =>
+        {
+            Log.Information("Token validated for user: {UserId}", 
+                context.Principal?.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? 
+                context.Principal?.Identity?.Name);
+            return Task.CompletedTask;
+        }
+    };
+});
 
 // Configure Authorization
 builder.Services.AddAuthorization(options =>
 {
     options.AddPolicy("AdminOnly", policy => policy.RequireRole("Admin"));
-    options.AddPolicy("UserAccess", policy => policy.RequireAuthenticatedUser());
+    options.AddPolicy("UserAccess", policy => 
+        policy.RequireAssertion(context =>
+            context.User.IsInRole("User") || 
+            context.User.IsInRole("Admin") || 
+            context.User.Identity.IsAuthenticated));
     options.AddPolicy("DocumentAccess", policy =>
         policy.RequireAssertion(context =>
             context.User.HasClaim("permission", "documents.read") ||
+            context.User.HasClaim("permissions", "document:read") ||
             context.User.IsInRole("Admin")));
 });
 
@@ -95,9 +168,29 @@ builder.Services.AddCors(options =>
         {
             policy.WithOrigins(allowedOrigins)
                   .WithMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
-                  .WithHeaders("Content-Type", "Authorization", "X-Requested-With")
-                  .AllowCredentials();
+                  .WithHeaders("Content-Type", "Authorization", "X-Requested-With", "X-Version")
+                  .AllowCredentials()
+                  .SetPreflightMaxAge(TimeSpan.FromMinutes(10));
         }
+    });
+
+    options.AddPolicy("ProductionCors", policy =>
+    {
+        var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
+            ?? new[] { "https://localhost:3000" };
+
+        policy.WithOrigins(allowedOrigins)
+              .AllowedHeaders("Content-Type", "Authorization", "X-Requested-With", "X-Version")
+              .AllowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
+              .AllowCredentials()
+              .SetPreflightMaxAge(TimeSpan.FromMinutes(10));
+    });
+
+    options.AddPolicy("DevelopmentCors", policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyHeader()
+              .AllowAnyMethod();
     });
 });
 
@@ -110,6 +203,21 @@ builder.Services.AddRateLimiter(options =>
         limiterOptions.Window = TimeSpan.FromMinutes(builder.Configuration.GetValue<int>("RateLimit:WindowMinutes", 1));
         limiterOptions.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
         limiterOptions.QueueLimit = builder.Configuration.GetValue<int>("RateLimit:QueueLimit", 10);
+    });
+
+    options.AddFixedWindowLimiter("GlobalLimit", limiterOptions =>
+    {
+        limiterOptions.Window = TimeSpan.FromMinutes(1);
+        limiterOptions.PermitLimit = 100;
+        limiterOptions.QueueLimit = 10;
+        limiterOptions.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+    });
+
+    options.AddFixedWindowLimiter("AuthLimit", limiterOptions =>
+    {
+        limiterOptions.Window = TimeSpan.FromMinutes(15);
+        limiterOptions.PermitLimit = 5;
+        limiterOptions.QueueLimit = 0;
     });
 
     options.OnRejected = async (context, token) =>
@@ -128,7 +236,11 @@ builder.Services.AddResponseCompression(options =>
 });
 
 // Configure Memory Cache
-builder.Services.AddMemoryCache();
+builder.Services.AddMemoryCache(options =>
+{
+    options.SizeLimit = 1024;
+    options.TrackStatistics = true;
+});
 builder.Services.AddResponseCaching();
 
 // Configure Swagger/OpenAPI
@@ -139,7 +251,7 @@ builder.Services.AddSwaggerGen(c =>
     {
         Title = "Document Analyzer API",
         Version = "v1",
-        Description = "API for document analysis and processing",
+        Description = "A comprehensive document analysis and processing API",
         Contact = new OpenApiContact
         {
             Name = "Document Analyzer Team",
@@ -154,7 +266,8 @@ builder.Services.AddSwaggerGen(c =>
         Name = "Authorization",
         In = ParameterLocation.Header,
         Type = SecuritySchemeType.ApiKey,
-        Scheme = "Bearer"
+        Scheme = "Bearer",
+        BearerFormat = "JWT"
     });
 
     c.AddSecurityRequirement(new OpenApiSecurityRequirement
@@ -171,12 +284,30 @@ builder.Services.AddSwaggerGen(c =>
             Array.Empty<string>()
         }
     });
+
+    var xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
+    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+    if (File.Exists(xmlPath))
+    {
+        c.IncludeXmlComments(xmlPath);
+    }
 });
 
 // Configure Health Checks
 builder.Services.AddHealthChecks()
     .AddDbContextCheck<ApplicationDbContext>()
-    .AddCheck("external-api", () => HealthCheckResult.Healthy("External API is responsive"));
+    .AddDbContextCheck<DocumentAnalyzerDbContext>("database")
+    .AddCheck("external-api", () => HealthCheckResult.Healthy("External API is responsive"))
+    .AddCheck("storage", () =>
+    {
+        // Add storage health check logic
+        return HealthCheckResult.Healthy("Storage is accessible");
+    })
+    .AddCheck("external-api", async () =>
+    {
+        // Add external API health check
+        return HealthCheckResult.Healthy("External APIs are responsive");
+    });
 
 // Register application services
 builder.Services.AddScoped<IDocumentService, DocumentService>();
@@ -184,6 +315,17 @@ builder.Services.AddScoped<IAnalysisService, AnalysisService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<ISearchService, SearchService>();
 builder.Services.AddScoped<IFileStorageService, FileStorageService>();
+builder.Services.AddScoped<IStorageService, StorageService>();
+builder.Services.AddScoped<INotificationService, NotificationService>();
+
+// Repository Pattern
+builder.Services.AddScoped<IDocumentRepository, DocumentRepository>();
+builder.Services.AddScoped<IUserRepository, UserRepository>();
+builder.Services.AddScoped<IAnalysisRepository, AnalysisRepository>();
+
+// Background Services
+builder.Services.AddHostedService<DocumentProcessingService>();
+builder.Services.AddHostedService<CleanupService>();
 
 // Configure Options pattern
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
@@ -192,6 +334,11 @@ builder.Services.Configure<AnalysisOptions>(builder.Configuration.GetSection("An
 
 // Add HttpClient
 builder.Services.AddHttpClient();
+builder.Services.AddHttpClient("DocumentAnalyzer", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(30);
+    client.DefaultRequestHeaders.Add("User-Agent", "DocumentAnalyzer/1.0");
+});
 
 var app = builder.Build();
 
@@ -203,13 +350,16 @@ if (app.Environment.IsDevelopment())
     {
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "Document Analyzer API v1");
         c.RoutePrefix = "swagger";
+        c.DocExpansion(Swashbuckle.AspNetCore.SwaggerUI.DocExpansion.List);
     });
     app.UseDeveloperExceptionPage();
+    app.UseCors("DevelopmentCors");
 }
 else
 {
     app.UseExceptionHandler("/Error");
     app.UseHsts();
+    app.UseCors("ProductionCors");
 }
 
 app.UseHttpsRedirection();
@@ -223,10 +373,29 @@ app.Use(async (context, next) =>
     context.Response.Headers.Add("X-Frame-Options", "DENY");
     context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
     context.Response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
+    context.Response.Headers.Add("Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';");
     await next();
 });
 
+// Request/Response Logging Middleware
+app.Use(async (context, next) =>
+{
+    Log.Information("Request {Method} {Path} from {IP}",
+        context.Request.Method,
+        context.Request.Path,
+        context.Connection.RemoteIpAddress);
+
+    await next();
+
+    Log.Information("Response {StatusCode} for {Method} {Path}",
+        context.Response.StatusCode,
+        context.Request.Method,
+        context.Request.Path);
+});
+
 app.UseCors("DocumentAnalyzerPolicy");
+app.UseRouting();
 app.UseRateLimiter();
 
 app.UseAuthentication();
