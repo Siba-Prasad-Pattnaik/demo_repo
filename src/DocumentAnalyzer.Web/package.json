@@ -10,6 +10,16 @@
     "react-dom": "^18.2.0",
     "react-router-dom": "^6.20.1",
     "axios": "^1.6.2",
+    "react-query": "^3.39.0",
+    "@headlessui/react": "^1.7.0",
+    "@heroicons/react": "^2.0.0",
+    "classnames": "^2.3.0",
+    "js-cookie": "^3.0.0",
+    "@types/js-cookie": "^3.0.0",
+    "react-dropzone": "^14.2.0",
+    "react-hook-form": "^7.43.0",
+    "zod": "^3.20.0",
+    "@hookform/resolvers": "^2.9.0",
     "typescript": "^5.3.3",
     "web-vitals": "^3.5.0"
   },
@@ -17,10 +27,19 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "lint": "eslint src --ext .ts,.tsx",
+    "lint:security": "eslint src --ext .ts,.tsx --config .eslintrc.security.js"
   },
   "devDependencies": {
-    "react-scripts": "5.0.1"
+    "react-scripts": "5.0.1",
+    "@testing-library/jest-dom": "^5.16.0",
+    "@testing-library/react": "^13.4.0",
+    "@testing-library/user-event": "^14.4.0",
+    "eslint": "^8.0.0",
+    "eslint-plugin-security": "^1.7.0",
+    "@typescript-eslint/eslint-plugin": "^5.0.0",
+    "@typescript-eslint/parser": "^5.0.0"
   },
   "browserslist": {
     "production": [
