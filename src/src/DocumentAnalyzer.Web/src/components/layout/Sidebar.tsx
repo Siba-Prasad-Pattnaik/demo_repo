@@ -1,16 +1,32 @@
 import React from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { LayoutDashboard, FileText, Upload, Search, Settings } from 'lucide-react';
+import {
+  Drawer,
+  List,
+  ListItem,
+  ListItemIcon,
+  ListItemText,
+  Toolbar,
+} from '@mui/material';
+import {
+  Dashboard,
+  Description,
+  CloudUpload,
+} from '@mui/icons-material';
 import { clsx } from 'clsx';
+
+const drawerWidth = 240;
 
 const Sidebar: React.FC = () => {
   const location = useLocation();
+  const navigate = useNavigate();
 
   const menuItems = [
-    { icon: LayoutDashboard, label: 'Dashboard', path: '/dashboard' },
-    { icon: FileText, label: 'Documents', path: '/documents' },
-    { icon: Upload, label: 'Upload', path: '/documents/upload' },
-    { icon: Search, label: 'Search', path: '/search' },
+    { icon: LayoutDashboard, label: 'Dashboard', path: '/dashboard', muiIcon: <Dashboard /> },
+    { icon: FileText, label: 'Documents', path: '/documents', muiIcon: <Description /> },
+    { icon: Upload, label: 'Upload', path: '/documents/upload', muiIcon: <CloudUpload /> },
+    { icon: Search, label: 'Search', path: '/search', muiIcon: <Search /> },
     { icon: Settings, label: 'Settings', path: '/settings' },
   ];
 
@@ -40,6 +56,32 @@ const Sidebar: React.FC = () => {
           })}
         </div>
       </nav>
+      <Drawer
+        variant="permanent"
+        sx={{
+          width: drawerWidth,
+          flexShrink: 0,
+          [`& .MuiDrawer-paper`]: {
+            width: drawerWidth,
+            boxSizing: 'border-box',
+          },
+        }}
+      >
+        <Toolbar />
+        <List>
+          {menuItems.map((item) => (
+            <ListItem
+              button
+              key={item.label}
+              selected={location.pathname === item.path}
+              onClick={() => navigate(item.path)}
+            >
+              <ListItemIcon>{item.muiIcon}</ListItemIcon>
+              <ListItemText primary={item.label} />
+            </ListItem>
+          ))}
+        </List>
+      </Drawer>
     </aside>
   );
 };

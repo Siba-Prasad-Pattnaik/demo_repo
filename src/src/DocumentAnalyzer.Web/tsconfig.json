@@ -25,7 +25,12 @@
       "@/components/*": ["components/*"],
       "@/pages/*": ["pages/*"],
       "@/services/*": ["services/*"],
-      "@/utils/*": ["utils/*"]
+      "@/utils/*": ["utils/*"],
+      "@components/*": ["components/*"],
+      "@pages/*": ["pages/*"],
+      "@services/*": ["services/*"],
+      "@utils/*": ["utils/*"],
+      "@types/*": ["types/*"]
     }
   },
   "include": [
