@@ -1,5 +1,9 @@
 using DocumentAnalyzer.Core;
+using DocumentAnalyzer.Core.Interfaces;
 using DocumentAnalyzer.Infrastructure;
+using DocumentAnalyzer.Infrastructure.Data;
+using DocumentAnalyzer.Infrastructure.Services;
+using DocumentAnalyzer.Infrastructure.Storage;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -7,6 +11,8 @@ using Microsoft.AspNetCore.Mvc.ApiExplorer;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.RateLimiting;
 using Serilog;
 using System.Reflection;
 using System.Text;
@@ -16,6 +22,13 @@ using System.Threading.RateLimiting;
 var builder = WebApplication.CreateBuilder(args);
 
 // Configure Serilog
+Log.Logger = new LoggerConfiguration()
+    .ReadFrom.Configuration(builder.Configuration)
+    .Enrich.FromLogContext()
+    .WriteTo.Console()
+    .WriteTo.File("logs/documentanalyzer-.txt", rollingInterval: RollingInterval.Day)
+    .CreateLogger();
+
 builder.Host.UseSerilog((context, configuration) =>
     configuration.ReadFrom.Configuration(context.Configuration));
 
@@ -33,6 +46,20 @@ services.AddControllers(options =>
 {
     options.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
     options.JsonSerializerOptions.WriteIndented = true;
+    options.JsonSerializerOptions.DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
+});
+
+// Database Configuration
+services.AddDbContext<ApplicationDbContext>(options =>
+{
+    var connectionString = configuration.GetConnectionString("DefaultConnection");
+    options.UseSqlServer(connectionString, b => b.MigrationsAssembly("DocumentAnalyzer.Infrastructure"));
+});
+
+// Redis Configuration
+services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = configuration.GetConnectionString("Redis");
 });
 
 // Add API versioning
@@ -67,11 +94,11 @@ services.AddAuthentication(options =>
         ValidateAudience = true,
         ValidateLifetime = true,
         ValidateIssuerSigningKey = true,
-        ValidIssuer = jwtSettings["Issuer"],
-        ValidAudience = jwtSettings["Audience"],
+        ValidIssuer = jwtSettings["Issuer"] ?? configuration["Jwt:Issuer"],
+        ValidAudience = jwtSettings["Audience"] ?? configuration["Jwt:Audience"],
         IssuerSigningKey = new SymmetricSecurityKey(
-            Encoding.UTF8.GetBytes(jwtSettings["SecretKey"]!)),
-        ClockSkew = TimeSpan.Parse(jwtSettings["ClockSkew"]!)
+            Encoding.UTF8.GetBytes(jwtSettings["SecretKey"] ?? configuration["Jwt:SecretKey"]!)),
+        ClockSkew = TimeSpan.Parse(jwtSettings["ClockSkew"] ?? "00:00:00")
     };
 
     options.Events = new JwtBearerEvents
@@ -97,6 +124,8 @@ services.AddAuthorization(options =>
         policy.RequireRole("Admin"));
     options.AddPolicy("RequireUserRole", policy =>
         policy.RequireRole("User", "Admin"));
+    options.AddPolicy("AdminOnly", policy => policy.RequireRole("Admin"));
+    options.AddPolicy("UserOrAdmin", policy => policy.RequireRole("User", "Admin"));
 });
 
 // Add CORS
@@ -105,7 +134,7 @@ services.AddCors(options =>
 {
     options.AddPolicy("DefaultCorsPolicy", policy =>
     {
-        var allowedOrigins = corsSettings.GetSection("AllowedOrigins").Get<string[]>() ?? Array.Empty<string>();
+        var allowedOrigins = corsSettings.GetSection("AllowedOrigins").Get<string[]>() ?? configuration.GetSection("AllowedOrigins").Get<string[]>() ?? new[] { "http://localhost:3000" };
         var allowedMethods = corsSettings.GetSection("AllowedMethods").Get<string[]>() ?? Array.Empty<string>();
         var allowedHeaders = corsSettings.GetSection("AllowedHeaders").Get<string[]>() ?? Array.Empty<string>();
         var allowCredentials = corsSettings.GetValue<bool>("AllowCredentials");
@@ -128,11 +157,21 @@ services.AddCors(options =>
         if (allowCredentials)
             policy.AllowCredentials();
     });
+
+    options.AddPolicy("DefaultPolicy", policy =>
+    {
+        policy.WithOrigins(configuration.GetSection("AllowedOrigins").Get<string[]>() ?? new[] { "http://localhost:3000" })
+              .AllowAnyHeader()
+              .AllowAnyMethod()
+              .AllowCredentials();
+    });
 });
 
 // Add Rate Limiting
 services.AddRateLimiter(options =>
 {
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
     var rateLimitConfig = configuration.GetSection("RateLimiting");
     var generalRules = rateLimitConfig.GetSection("GeneralRules");
 
@@ -152,12 +191,30 @@ services.AddRateLimiter(options =>
         limiterOptions.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
         limiterOptions.QueueLimit = 5;
     });
+
+    options.AddFixedWindowLimiter("DocumentUpload", configure =>
+    {
+        configure.PermitLimit = 10;
+        configure.Window = TimeSpan.FromMinutes(1);
+        configure.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+        configure.QueueLimit = 5;
+    });
+
+    options.AddFixedWindowLimiter("Analysis", configure =>
+    {
+        configure.PermitLimit = 50;
+        configure.Window = TimeSpan.FromMinutes(1);
+        configure.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+        configure.QueueLimit = 10;
+    });
 });
 
 // Add Health Checks
 services.AddHealthChecks()
     .AddCheck("self", () => HealthCheckResult.Healthy())
-    .AddDbContextCheck<DocumentAnalyzer.Infrastructure.Data.ApplicationDbContext>();
+    .AddDbContextCheck<ApplicationDbContext>()
+    .AddRedis(configuration.GetConnectionString("Redis"))
+    .AddUrlGroup(new Uri(configuration["ExternalServices:StorageHealthCheck"]), "storage");
 
 // Add Swagger/OpenAPI
 services.AddEndpointsApiExplorer();
@@ -166,9 +223,9 @@ services.AddSwaggerGen(c =>
     var swaggerConfig = configuration.GetSection("Swagger");
     c.SwaggerDoc("v1", new OpenApiInfo
     {
-        Title = swaggerConfig["Title"],
-        Version = swaggerConfig["Version"],
-        Description = swaggerConfig["Description"],
+        Title = swaggerConfig["Title"] ?? "Document Analyzer API",
+        Version = swaggerConfig["Version"] ?? "v1",
+        Description = swaggerConfig["Description"] ?? "API for document analysis and processing",
         Contact = new OpenApiContact
         {
             Name = swaggerConfig["ContactName"],
@@ -220,6 +277,17 @@ if (!string.IsNullOrEmpty(configuration["ApplicationInsights:ConnectionString"])
 services.AddCoreServices(configuration);
 services.AddInfrastructureServices(configuration);
 
+// Application Services
+services.AddScoped<IDocumentService, DocumentService>();
+services.AddScoped<IAnalysisService, AnalysisService>();
+services.AddScoped<IAuthService, AuthService>();
+services.AddScoped<ISearchService, SearchService>();
+services.AddScoped<IStorageService, StorageService>();
+services.AddScoped<INotificationService, NotificationService>();
+
+// Background Services
+services.AddHostedService<DocumentProcessingService>();
+
 // Add AutoMapper
 services.AddAutoMapper(Assembly.GetExecutingAssembly());
 
@@ -228,6 +296,12 @@ services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(Assembly.GetExecutin
 
 // Add FluentValidation
 services.AddValidatorsFromAssembly(Assembly.GetExecutingAssembly());
+
+// Memory Cache
+services.AddMemoryCache();
+
+// HTTP Client Factory
+services.AddHttpClient();
 
 var app = builder.Build();
 
@@ -266,15 +340,17 @@ app.UseSerilogRequestLogging(options =>
 
 // Security headers
 app.UseSecurityHeaders();
+app.UseMiddleware<SecurityHeadersMiddleware>();
 
 // HTTPS and redirections
 app.UseHttpsRedirection();
 
-// CORS
-app.UseCors("DefaultCorsPolicy");
-
 // Rate limiting
 app.UseRateLimiter();
+
+// CORS
+app.UseCors("DefaultCorsPolicy");
+app.UseCors("DefaultPolicy");
 
 // Authentication and Authorization
 app.UseAuthentication();
@@ -305,6 +381,8 @@ app.MapHealthChecks("/health", new HealthCheckOptions
     }
 });
 
+app.UseHealthChecks("/health/ready");
+
 // Graceful shutdown
 var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
 lifetime.ApplicationStopping.Register(() =>
@@ -316,6 +394,7 @@ Log.Information("Starting Document Analyzer API...");
 
 try
 {
+    Log.Information("Starting Document Analyzer API");
     await app.RunAsync();
 }
 catch (Exception ex)
@@ -330,26 +409,36 @@ finally
 // Helper classes
 public class SlugifyParameterTransformer : IOutboundParameterTransformer
 {
-    public string? TransformOutbound(object? value)
+    public string TransformOutbound(object value)
     {
-        return value?.ToString()?.ToLowerInvariant();
+        return value?.ToString()?.ToLowerInvariant() ?? string.Empty;
     }
 }
 
-public static class SecurityHeadersExtensions
+public class SecurityHeadersMiddleware
 {
-    public static IApplicationBuilder UseSecurityHeaders(this IApplicationBuilder app)
-    {
-        return app.Use(async (context, next) =>
-        {
-            context.Response.Headers.Add("X-Frame-Options", "DENY");
-            context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
-            context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
-            context.Response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
-            context.Response.Headers.Add("Content-Security-Policy",
-                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';");
+    private readonly RequestDelegate _next;
 
-            await next();
-        });
+    public SecurityHeadersMiddleware(RequestDelegate next)
+    {
+        _next = next;
+    }
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
+        context.Response.Headers.Add("X-Frame-Options", "DENY");
+        context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
+        context.Response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
+        
+        await _next(context);
+    }
+}
+
+public static class ApplicationBuilderExtensions
+{
+    public static IApplicationBuilder UseSecurityHeaders(this IApplicationBuilder builder)
+    {
+        return builder.UseMiddleware<SecurityHeadersMiddleware>();
     }
 }
