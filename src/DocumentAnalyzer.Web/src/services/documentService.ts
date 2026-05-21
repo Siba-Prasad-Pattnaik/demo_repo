@@ -18,6 +18,8 @@ export interface DocumentAnalysis {
   sentiment: SentimentAnalysis;
   summary: string;
   confidence: number;
+  keyEntities: string[];
+  createdAt: string;
 }
 
 export interface Entity {
@@ -32,6 +34,11 @@ export interface SentimentAnalysis {
   score: number;
   label: 'positive' | 'negative' | 'neutral';
   confidence: number;
+}
+
+export interface UploadDocumentRequest {
+  file: File;
+  metadata?: Record<string, any>;
 }
 
 class DocumentService {
@@ -58,20 +65,42 @@ class DocumentService {
     if (suspiciousPatterns.some(pattern => pattern.test(file.name))) {
       throw new Error('File name contains potentially dangerous extensions.');
     }
+
+    // Additional filename validation
+    if (!/^[a-zA-Z0-9._-]+$/.test(file.name)) {
+      throw new Error('Invalid filename. Only alphanumeric characters, dots, hyphens, and underscores allowed');
+    }
   }
 
-  async uploadDocument(file: File): Promise<Document> {
+  async uploadDocument(file: File): Promise<Document>;
+  async uploadDocument(request: UploadDocumentRequest): Promise<Document>;
+  async uploadDocument(fileOrRequest: File | UploadDocumentRequest): Promise<Document> {
     try {
+      let file: File;
+      let metadata: Record<string, any> | undefined;
+
+      if (fileOrRequest instanceof File) {
+        file = fileOrRequest;
+      } else {
+        file = fileOrRequest.file;
+        metadata = fileOrRequest.metadata;
+      }
+
       this.validateFile(file);
 
       const formData = new FormData();
       formData.append('file', file);
       formData.append('checksum', await this.calculateFileChecksum(file));
 
+      if (metadata) {
+        formData.append('metadata', JSON.stringify(metadata));
+      }
+
       const response = await apiService.post<Document>('/documents/upload', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
+        timeout: 120000, // 2 minutes for file upload
       });
 
       return response;
@@ -135,6 +164,12 @@ class DocumentService {
       throw new Error('Failed to analyze document');
     }
   }
+
+  async getAnalysis(documentId: string): Promise<DocumentAnalysis> {
+    return apiService.get<DocumentAnalysis>(`/analysis/${documentId}`);
+  }
 }
 
-export default new DocumentService();
+const documentService = new DocumentService();
+export default documentService;
+export { documentService };

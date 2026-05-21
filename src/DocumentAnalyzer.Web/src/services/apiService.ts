@@ -1,12 +1,14 @@
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios';
-import authService from './authService';
+import { authService } from './authService';
+
+const API_BASE_URL = process.env.REACT_APP_API_URL || 'https://localhost:5001/api';
 
 class ApiService {
   private api: AxiosInstance;
 
   constructor() {
     this.api = axios.create({
-      baseURL: process.env.REACT_APP_API_URL || '/api',
+      baseURL: API_BASE_URL,
       timeout: 30000,
       headers: {
         'Content-Type': 'application/json',
@@ -35,15 +37,25 @@ class ApiService {
       }
     );
 
-    // Response interceptor for error handling
+    // Response interceptor for token refresh and error handling
     this.api.interceptors.response.use(
       (response: AxiosResponse) => {
         return response;
       },
       async (error) => {
-        if (error.response?.status === 401) {
-          authService.logout();
-          window.location.href = '/login';
+        const originalRequest = error.config;
+
+        if (error.response?.status === 401 && !originalRequest._retry) {
+          originalRequest._retry = true;
+
+          const newToken = await authService.refreshToken();
+          if (newToken) {
+            originalRequest.headers.Authorization = `Bearer ${newToken}`;
+            return this.api(originalRequest);
+          } else {
+            authService.logout();
+            window.location.href = '/login';
+          }
         }
 
         return Promise.reject(error);
@@ -70,26 +82,27 @@ class ApiService {
   }
 
   async get<T = any>(url: string, config?: AxiosRequestConfig): Promise<T> {
-    const response = await this.api.get<T>(url, config);
+    const response: AxiosResponse<T> = await this.api.get(url, config);
     return response.data;
   }
 
   async post<T = any>(url: string, data?: any, config?: AxiosRequestConfig): Promise<T> {
     const sanitizedData = this.sanitizeInput(data);
-    const response = await this.api.post<T>(url, sanitizedData, config);
+    const response: AxiosResponse<T> = await this.api.post(url, sanitizedData, config);
     return response.data;
   }
 
   async put<T = any>(url: string, data?: any, config?: AxiosRequestConfig): Promise<T> {
     const sanitizedData = this.sanitizeInput(data);
-    const response = await this.api.put<T>(url, sanitizedData, config);
+    const response: AxiosResponse<T> = await this.api.put(url, sanitizedData, config);
     return response.data;
   }
 
   async delete<T = any>(url: string, config?: AxiosRequestConfig): Promise<T> {
-    const response = await this.api.delete<T>(url, config);
+    const response: AxiosResponse<T> = await this.api.delete(url, config);
     return response.data;
   }
 }
 
+export const apiService = new ApiService();
 export default new ApiService();
