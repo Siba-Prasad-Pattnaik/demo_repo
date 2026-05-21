@@ -43,6 +43,16 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="8.0.0" />
   </ItemGroup>
 
+  <!-- Authentication & Authorization -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="8.0.0" />
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="7.0.3" />
+    <PackageReference Include="Microsoft.IdentityModel.Tokens" Version="7.0.3" />
+    <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
+    <PackageReference Include="Microsoft.AspNetCore.DataProtection" Version="8.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.DataProtection.EntityFrameworkCore" Version="8.0.0" />
+  </ItemGroup>
+
   <!-- Logging -->
   <ItemGroup>
     <PackageReference Include="Serilog" Version="3.1.1" />
@@ -87,15 +97,6 @@
     <PackageReference Include="AspNetCore.HealthChecks.UI.Client" Version="7.1.0" />
     <PackageReference Include="AspNetCore.HealthChecks.UI.InMemory.Storage" Version="7.0.0" />
     <PackageReference Include="AspNetCore.HealthChecks.Redis" Version="7.0.1" />
-  </ItemGroup>
-
-  <!-- Security & Authentication -->
-  <ItemGroup>
-    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="7.0.3" />
-    <PackageReference Include="Microsoft.IdentityModel.Tokens" Version="7.0.3" />
-    <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
-    <PackageReference Include="Microsoft.AspNetCore.DataProtection" Version="8.0.0" />
-    <PackageReference Include="Microsoft.AspNetCore.DataProtection.EntityFrameworkCore" Version="8.0.0" />
   </ItemGroup>
 
   <!-- Cloud Storage -->
@@ -174,7 +175,7 @@
     <PackageReference Include="Microsoft.Extensions.Options" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Options.DataAnnotations" Version="8.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.AzureKeyVault" Version="3.1.24" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.AzureKeyVault" Version="8.0.0" />
   </ItemGroup>
 
   <!-- Testing & Development -->
@@ -200,31 +201,5 @@
     <Content Include="appsettings.Production.json" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="appsettings.Staging.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
-
-  <!-- Folders -->
-  <ItemGroup>
-    <Folder Include="logs\" />
-    <Folder Include="uploads\" />
-    <Folder Include="keys\" />
-    <Folder Include="temp\" />
-  </ItemGroup>
-
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
-    <DebugType>portable</DebugType>
-    <DebugSymbols>true</DebugSymbols>
-  </PropertyGroup>
-
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
-    <DefineConstants>TRACE</DefineConstants>
-    <DebugType>pdbonly</DebugType>
-    <Optimize>true</Optimize>
-  </PropertyGroup>
-
-  <Target Name="CreateLogsDirectory" BeforeTargets="Build">
-    <MakeDir Directories="$(OutDir)logs" Condition="!Exists('$(OutDir)logs')" />
-    <MakeDir Directories="$(OutDir)uploads" Condition="!Exists('$(OutDir)uploads')" />
-    <MakeDir Directories="$(OutDir)keys" Condition="!Exists('$(OutDir)keys')" />
-  </Target>
 
 </Project>
